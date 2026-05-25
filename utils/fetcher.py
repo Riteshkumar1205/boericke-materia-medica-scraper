@@ -35,5 +35,12 @@ def fetch_html(url: str, session: requests.Session) -> str:
     """Fetch HTML for a URL using the provided session."""
     response = session.get(url, timeout=30)
     response.raise_for_status()
-    response.encoding = response.apparent_encoding or "latin-1"
+    
+    # Force windows-1252 (CP1252) fallback instead of latin-1 (ISO-8859-1)
+    # The source pages contain CP1252 characters like the Œ ligature (byte 0x8C)
+    response.encoding = response.apparent_encoding or "windows-1252"
+    if response.encoding.lower() in {"latin-1", "iso-8859-1"}:
+        response.encoding = "windows-1252"
+        
     return response.text
+

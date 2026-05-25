@@ -1,28 +1,16 @@
-"""
-Boericke's Homoeopathic Materia Medica - DOM-Aware Parsing Engine
-================================================================
-
-Implements a premium, DOM-aware parsing pipeline that accurately extracts 
-structured data from materia medica remedy pages, eliminating section key 
-and text fragmentation while preventing title/common-name bleed.
-"""
-
-from __future__ import annotations
-
-import re
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse
-
+import requests
 from bs4 import BeautifulSoup
+import re
+from typing import List, Tuple, Optional, Dict
 
-from .cleaner import clean_text
+urls = [
+    ('ACON', 'http://homeoint.org/books/boericmm/a/acon.htm'),
+    ('ABIES-C', 'http://homeoint.org/books/boericmm/a/abies-c.htm'),
+    ('ACETAN', 'http://homeoint.org/books/boericmm/a/acetan.htm'),
+    ('ABR', 'http://homeoint.org/books/boericmm/a/abr.htm'),
+    ('ABROT', 'http://homeoint.org/books/boericmm/a/abrot.htm'),
+]
 
-# Link validation constants
-BAD_LINK_LABELS = {"MAIN", "HOME"}
-REMEDY_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]+\.htm$", re.IGNORECASE)
-
-# Comprehensive heading aliases mapped to canonical Title Case headings.
-# Using Title Case keys guarantees compatibility with the expected output schema.
 CANONICAL_SECTION_ALIASES: Dict[str, str] = {
     "MIND": "Mind",
     "HEAD": "Head",
@@ -57,14 +45,12 @@ CANONICAL_SECTION_ALIASES: Dict[str, str] = {
     "DESIRES": "Desires",
     "AVERSIONS": "Aversions",
 
-    # Singular and plural aliases
     "EYE": "Eyes",
     "EAR": "Ears",
     "STOOLS": "Stool",
     "DOSES": "Dose",
     "MODALITY": "Modalities",
 
-    # Relationships and variants
     "RELATIONSHIPS": "Relationships",
     "RELATIONSHIP": "Relationships",
     "RELATIONS": "Relationships",
@@ -83,104 +69,24 @@ CANONICAL_SECTION_ALIASES: Dict[str, str] = {
 }
 
 RELATIONSHIP_HEADING_SET = {
-    "Relationships",
-    "Compare",
-    "Complementary",
-    "Antidote",
-    "Antidotes",
-    "Inimical",
-    "Incompatible",
-    "Follows",
-    "Followed",
-    "Similar",
-    "Compatible",
-    "Collateral",
+    "Relationships", "Compare", "Complementary", "Antidote", "Antidotes",
+    "Inimical", "Incompatible", "Follows", "Followed", "Similar", "Compatible", "Collateral"
 }
 
-# Regex to match inline headings at the start of a block (e.g. "Mind.-- Great fear")
 INLINE_HEADING_RE = re.compile(
     r"^\s*(?P<name>[A-Za-z][A-Za-z\s\-&]{1,30})\s*(?:\.?:?)\s*--+\s*(?P<rest>.*)$"
 )
 
-
-def canonicalize_url(url: str) -> str:
-    """Strip query params and fragments to keep URLs canonical."""
-    parsed = urlparse(url)
-    return urlunparse(parsed._replace(query="", fragment=""))
-
-
-def _is_valid_remedy_url(href: str, base_url: str) -> bool:
-    """Check if an absolute URL is a valid remedy page."""
-    if not href:
-        return False
-
-    if href.startswith("#") or href.lower().startswith("javascript:"):
-        return False
-
-    absolute = urljoin(base_url, href.strip())
-    parsed = urlparse(absolute)
-    path = parsed.path or ""
-
-    if not path.lower().endswith(".htm"):
-        return False
-
-    filename = path.rsplit("/", 1)[-1]
-    if filename.lower() in {"index.htm", "main.htm"}:
-        return False
-
-    if re.match(r"^[A-Za-z]\.htm$", filename):
-        return False
-
-    return bool(REMEDY_FILENAME_PATTERN.match(filename))
-
-
-def _normalize_href(href: str, base_url: str) -> str:
-    """Resolve and canonicalize a relative link."""
-    return canonicalize_url(urljoin(base_url, href.strip()))
-
-
-def extract_remedy_links(html: str, base_url: str, letter: str) -> List[Dict[str, str]]:
-    """Extract remedy links from an index page blockquote."""
-    soup = BeautifulSoup(html, "lxml")
-    blockquotes = soup.find_all("blockquote")
-
-    remedies: List[Dict[str, str]] = []
-    seen_urls = set()
-
-    for blockquote in blockquotes:
-        for a_tag in blockquote.find_all("a", href=True):
-            if not _is_valid_remedy_url(a_tag["href"], base_url):
-                continue
-
-            abbreviation = clean_text(a_tag.get_text()).upper()
-            if not abbreviation or abbreviation in BAD_LINK_LABELS or len(abbreviation) == 1:
-                continue
-
-            url = _normalize_href(a_tag["href"], base_url)
-            if url in seen_urls:
-                continue
-
-            seen_urls.add(url)
-            remedies.append(
-                {
-                    "abbreviation": abbreviation,
-                    "url": url,
-                    "letter": letter,
-                }
-            )
-
-    return remedies
-
+def clean_text(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 def get_dom_text_blocks(soup_element) -> List[str]:
-    """
-    Traverse the DOM structure recursively, grouping text by block-level elements.
-    
-    This preserves tag sequence and prevents text fragmentation caused by malformed, 
-    interleaved formatting tags (such as mismatched <font> and <b> tags).
-    """
-    blocks: List[str] = []
-    current_block: List[str] = []
+    blocks = []
+    current_block = []
 
     def flush_block():
         if current_block:
@@ -193,8 +99,6 @@ def get_dom_text_blocks(soup_element) -> List[str]:
     def traverse(node):
         if node.name in {"script", "style", "title"}:
             return
-        
-        # Elements that denote a semantic text block boundary
         is_block = node.name in {
             "p", "div", "blockquote", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "table"
         }
@@ -216,43 +120,29 @@ def get_dom_text_blocks(soup_element) -> List[str]:
     flush_block()
     return blocks
 
-
 def is_site_header(text: str) -> bool:
-    """Check if a text block belongs to site-wide headers or navigation."""
     normalized = text.strip().upper()
     if normalized in {"HOME", "MAIN", "INDEX", "NEXT", "PREVIOUS", "|"}:
         return True
-
-    # Bulletproof pattern matching both correct Œ and mojibake \x8c / \u008c
+    
     headers = [
-        r"hom[oœŒ\x8c\u008c]{1,2}pathic materia medica",
+        r"hom[oœŒe]{1,2}pathic materia medica",
         r"by william boericke",
         r"presented by",
         r"copyright",
     ]
     return any(re.search(pat, text, re.IGNORECASE) for pat in headers)
 
-
-
 def _normalize_section_heading(raw_heading: str) -> Optional[str]:
-    """Normalize raw heading text to a canonical Title Case name, or return None."""
     heading = clean_text(raw_heading).strip().upper()
     heading = heading.rstrip(":;,-.")
     return CANONICAL_SECTION_ALIASES.get(heading)
 
-
 def detect_section_heading(block: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Determine if a block is a section heading.
-    
-    Returns:
-        (canonical_heading_name, remaining_inline_content) or (None, None)
-    """
     block_clean = clean_text(block).upper().rstrip(".:- ")
     if block_clean in CANONICAL_SECTION_ALIASES:
         return CANONICAL_SECTION_ALIASES[block_clean], None
-
-    # Check for inline headings like "Mind.-- Great fear"
+        
     match = INLINE_HEADING_RE.match(block)
     if match:
         name = match.group("name")
@@ -260,37 +150,26 @@ def detect_section_heading(block: str) -> Tuple[Optional[str], Optional[str]]:
         canon_name = _normalize_section_heading(name)
         if canon_name:
             return canon_name, clean_text(rest)
-
-    # Check for colon separators, e.g. "HEAD: Vertigo"
+            
     if ":" in block:
         left, right = block.split(":", 1)
         canon_left = _normalize_section_heading(left)
         if canon_left:
             return canon_left, clean_text(right)
-
+            
     return None, None
 
-
 def sanitize_full_name(name: str) -> str:
-    """Remove chemical suffix assignments and standard boilerplate from the title."""
-    name_clean = clean_text(name)
-    if ":" in name_clean:
-        left, right = name_clean.split(":", 1)
+    if ":" in name:
+        left, right = name.split(":", 1)
         if "=" in right or ";" in right:
-            name_clean = left
-    return clean_text(name_clean)
-
+            name = left
+    return clean_text(name)
 
 def parse_title_block(text: str, abbreviation: str) -> Tuple[str, Optional[str]]:
-    """
-    Split the remedy title block into full_name and common_name.
-    
-    Supports dashes, parentheses, uppercase transitions, and fallback defaults.
-    """
     text = clean_text(text)
     text = re.sub(r"^home\s+", "", text, flags=re.IGNORECASE)
 
-    # Parentheses separation: e.g. "GLONOINUM (Nitro-glycerine)"
     if "(" in text and ")" in text:
         inner = re.search(r"\(([^)]+)\)", text)
         if inner:
@@ -298,7 +177,6 @@ def parse_title_block(text: str, abbreviation: str) -> Tuple[str, Optional[str]]
             full = clean_text(re.sub(r"\s*\([^)]*\)", "", text))
             return sanitize_full_name(full), common
 
-    # Dash separation: e.g. "ABIES CANADENSIS - Hemlock Spruce"
     dashes = [r"\s*--+\s*", r"\s+-\s+"]
     for dash in dashes:
         parts = re.split(dash, text)
@@ -307,7 +185,6 @@ def parse_title_block(text: str, abbreviation: str) -> Tuple[str, Optional[str]]
             common = " - ".join(parts[1:])
             return sanitize_full_name(full), clean_text(common)
 
-    # Uppercase-to-TitleCase separation: e.g. "ACONITUM NAPELLUS Monkshood"
     tokens = text.split()
     full_tokens = []
     for token in tokens:
@@ -316,41 +193,15 @@ def parse_title_block(text: str, abbreviation: str) -> Tuple[str, Optional[str]]
             full_tokens.append(token)
         else:
             break
-
+            
     if full_tokens:
         full = " ".join(full_tokens)
-        common = " ".join(tokens[len(full_tokens) :])
+        common = " ".join(tokens[len(full_tokens):])
         return sanitize_full_name(full), (clean_text(common) if common else None)
 
     return sanitize_full_name(text), None
 
-
-def parse_names_and_intro(filtered_blocks: List[str], abbreviation: str) -> Tuple[str, Optional[str], int]:
-    """
-    Extract Full Name, Common Name, and locate the index of the first general block.
-    
-    Handles cases where the common name is in the first block or on the adjacent line block.
-    """
-    if not filtered_blocks:
-        return abbreviation, None, 0
-
-    first_block = filtered_blocks[0]
-    full_name, common_name = parse_title_block(first_block, abbreviation)
-
-    intro_start_idx = 1
-    # Check if the next block is actually the common name (occurs when split by <br>)
-    if not common_name and len(filtered_blocks) > 1:
-        second_block = filtered_blocks[1]
-        is_heading, _ = detect_section_heading(second_block)
-        if not is_heading and len(second_block) < 60:
-            common_name = clean_text(second_block)
-            intro_start_idx = 2
-
-    return full_name, common_name, intro_start_idx
-
-
 def strip_title_bleed(general: str, full_name: str, common_name: Optional[str]) -> str:
-    """Remove full name, common name, and formula metadata contamination from general text."""
     value = clean_text(general)
     if not value:
         return ""
@@ -364,7 +215,6 @@ def strip_title_bleed(general: str, full_name: str, common_name: Optional[str]) 
         pattern = r"^\s*" + re.escape(prefix) + r"(?:\s*[-,:;.]?\s*)"
         return re.sub(pattern, "", v, flags=re.IGNORECASE).strip()
 
-    # Clean in multiple passes to handle various combinations
     for _ in range(3):
         before = value
         if fn and cn:
@@ -379,49 +229,25 @@ def strip_title_bleed(general: str, full_name: str, common_name: Optional[str]) 
         if value == before:
             break
 
-    # Strip formula metadata assignments: e.g. "GL = ...; O = ..."
+    # Strip formula prefixes
     value = re.sub(r"^(?:[A-Z]{1,4}\s*=\s*[^;]{1,80};\s*){1,8}", "", value).strip()
     value = re.sub(r"^[A-Z]{1,4}\s*=\s*[A-Za-z]{2,}\s*", "", value).strip()
 
-    # Drop leading parenthetical title echoes, e.g. "(JEQUIRITY - ARBRUS PRECATORIUS) ..."
-    if value.startswith("(") and ")" in value[:120]:
-        leading = value[1 : value.find(")")].strip()
-        if leading:
-            lead_clean = clean_text(leading)
-            if "-" in lead_clean and lead_clean.upper() == lead_clean and len(lead_clean) <= 90:
-                value = value[value.find(")") + 1 :].strip()
-                value = value.lstrip(" -:;,.\"'")
-
     return clean_text(value)
 
-
-def parse_remedy_html(
-    soup: BeautifulSoup,
-    url: str,
-    abbreviation: str,
-    letter: str,
-) -> Dict[str, object]:
-    """
-    Parse remedy page HTML into structured data using a DOM-aware pipeline.
-    
-    1. Extracts direct DOM block elements cleanly.
-    2. Identifies full name and common name from initial blocks.
-    3. Traverses blocks, starting new sections on heading matches.
-    4. Separates and concatenates relationships content.
-    5. Cleans and strips title/common-name bleed from the general block.
-    """
+def parse_remedy_html(soup: BeautifulSoup, url: str, abbreviation: str, letter: str) -> dict:
     blocks = get_dom_text_blocks(soup.body or soup)
     filtered = [b for b in blocks if not is_site_header(b)]
-
-    # Extract remedy title & common name
+    
+    # Extract title and common name
     full_name, common_name, intro_start = parse_names_and_intro(filtered, abbreviation)
-
-    general_parts: List[str] = []
-    sections: Dict[str, str] = {}
-    current_section: Optional[str] = None
-    current_content: List[str] = []
-    relationships_parts: List[str] = []
-
+    
+    general_parts = []
+    sections = {}
+    current_section = None
+    current_content = []
+    relationships_parts = []
+    
     def flush_section():
         nonlocal current_section, current_content, sections, relationships_parts
         if current_section:
@@ -434,12 +260,12 @@ def parse_remedy_html(
         current_section = None
         current_content = []
 
-    # Loop through the remaining blocks
+    # Loop through content blocks starting after Title and Common Name
     for block in filtered[intro_start:]:
-        # Detect copyright cutoff
+        # Cutoff at copyright / footer markers
         if re.search(r"copyright\s*©|copyright\s*Š\s*Médi-T|presented by", block, re.IGNORECASE):
             break
-
+            
         heading, rest = detect_section_heading(block)
         if heading:
             flush_section()
@@ -451,16 +277,14 @@ def parse_remedy_html(
                 current_content.append(block)
             else:
                 general_parts.append(block)
-
+                
     flush_section()
-
-    # Re-assemble and strip title bleed from general introduction
+    
     general = clean_text(" ".join(general_parts))
     general = strip_title_bleed(general, full_name, common_name)
-
+    
     relationships = clean_text(" ".join(relationships_parts)) if relationships_parts else None
-
-    # Enforce strict schema constraints
+    
     return {
         "abbreviation": abbreviation,
         "full_name": full_name,
@@ -471,3 +295,35 @@ def parse_remedy_html(
         "sections": sections,
         "relationships": relationships,
     }
+
+def parse_names_and_intro(filtered_blocks: List[str], abbreviation: str) -> Tuple[str, Optional[str], int]:
+    if not filtered_blocks:
+        return abbreviation, None, 0
+
+    first_block = filtered_blocks[0]
+    full_name, common_name = parse_title_block(first_block, abbreviation)
+    
+    intro_start_idx = 1
+    if not common_name and len(filtered_blocks) > 1:
+        second_block = filtered_blocks[1]
+        is_heading, _ = detect_section_heading(second_block)
+        if not is_heading and len(second_block) < 60:
+            common_name = clean_text(second_block)
+            intro_start_idx = 2
+            
+    return full_name, common_name, intro_start_idx
+
+for abbr, url in urls:
+    r = requests.get(url, timeout=30)
+    # Decode as windows-1252 (cp1252) specifically to parse Œ correctly
+    r.encoding = "windows-1252"
+    soup = BeautifulSoup(r.text, 'lxml')
+    result = parse_remedy_html(soup, url, abbr, 'A')
+    
+    print(f"=== Parser Test: {abbr} ===")
+    print(f"Full Name:   {result['full_name']}")
+    print(f"Common Name: {result['common_name']}")
+    print(f"General:     {result['general'][:100]}...")
+    print(f"Sections ({len(result['sections'])}): {list(result['sections'].keys())}")
+    print(f"Relationships: {result['relationships']}")
+    print()

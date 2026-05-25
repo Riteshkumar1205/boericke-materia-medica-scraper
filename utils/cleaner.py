@@ -11,6 +11,8 @@ def clean_text(value: Optional[str]) -> str:
     text = str(value)
     # Normalize unicode
     text = unicodedata.normalize("NFC", text)
+    # Drop C0/C1 control characters (common mojibake artifacts from legacy encodings)
+    text = re.sub(r"[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]", "", text)
     # Remove excessive whitespace
     text = re.sub(r"\s+", " ", text)
     return text.strip()
@@ -26,7 +28,7 @@ def is_footer_marker(text: str) -> bool:
     markers = [
         r"copyright\s*©",
         r"médi\s*[-]?\s*t\s*\d{4}",
-        r"homoeopathic materia medica",
+        r"hom(?:oe|e)?opathic materia medica",
         r"by william boericke",
         r"presented by",
     ]
@@ -43,8 +45,9 @@ def is_site_header(text: str) -> bool:
         r"^main\s*$",
         r"^index\s*$",
         r"navigation",
-        r"homoeopathic materia medica",
+        r"hom(?:oe|e)?opathic materia medica",
         r"by william boericke",
+        r"presented by",
     ]
     for header in headers:
         if re.search(header, text, re.IGNORECASE):

@@ -27,6 +27,101 @@ CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]")
 EXCESSIVE_SPACES_PATTERN = re.compile(r"\s{2,}")
 MALFORMED_UNICODE_PATTERN = re.compile(r"[\ufffd\ufffd]")  # Replacement characters
 
+# Canonical section headings expected from the semantic parser.
+# Keep in sync with the parser's canonical set; unknown headings are considered malformed.
+ALLOWED_SECTION_HEADINGS = {
+    "MIND",
+    "HEAD",
+    "EYES",
+    "EARS",
+    "NOSE",
+    "FACE",
+    "MOUTH",
+    "THROAT",
+    "STOMACH",
+    "ABDOMEN",
+    "RECTUM",
+    "STOOL",
+    "URINE",
+    "URINARY",
+    "MALE",
+    "FEMALE",
+    "RESPIRATORY",
+    "CHEST",
+    "HEART",
+    "BACK",
+    "EXTREMITIES",
+    "LIMBS",
+    "SKIN",
+    "FEVER",
+    "SLEEP",
+    "MODALITIES",
+    "DOSE",
+    "CLINICAL",
+    "GENERALITIES",
+    "DREAMS",
+    "DESIRES",
+    "AVERSIONS",
+}
+
+# These headings should be extracted into the dedicated "relationships" field, not left in sections.
+RELATIONSHIP_HEADINGS = {
+    "RELATIONSHIPS",
+    "RELATIONSHIP",
+    "RELATIONS",
+    "RELATION",
+    "COMPARE",
+    "COMPLEMENTARY",
+    "ANTIDOTE",
+    "ANTIDOTES",
+    "INIMICAL",
+    "INCOMPATIBLE",
+    "FOLLOWS",
+    "FOLLOWED",
+    "SIMILAR",
+    "COMPATIBLE",
+    "COLLATERAL",
+}
+
+# Heuristic tail-words used to detect likely truncation.
+TRUNCATION_TAIL_WORDS = {
+    "and",
+    "or",
+    "with",
+    "without",
+    "as",
+    "to",
+    "of",
+    "the",
+    "a",
+    "an",
+    "in",
+    "on",
+    "for",
+    "from",
+    "by",
+    "at",
+    "this",
+    "that",
+    "which",
+    "who",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "it",
+    "its",
+    "his",
+    "her",
+    "their",
+    "there",
+    "these",
+    "those",
+}
+
 
 def _normalize_text(value: Optional[str]) -> str:
     if value is None:
@@ -53,6 +148,46 @@ def _contains_malformed_unicode(text: str) -> bool:
 
 def _has_excessive_whitespace(text: str) -> bool:
     return bool(EXCESSIVE_SPACES_PATTERN.search(text))
+
+
+def _normalize_heading_key(value: str) -> str:
+    text = unicodedata.normalize("NFC", str(value))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.upper()
+
+
+def _simplify_prefix(value: str) -> str:
+    """Normalize a string for prefix comparisons (case/punct insensitive)."""
+    text = unicodedata.normalize("NFC", str(value))
+    text = re.sub(r"[^A-Za-z0-9]+", " ", text).strip().upper()
+    return re.sub(r"\s{2,}", " ", text)
+
+
+def _general_starts_with_title(general: str, full_name: str, common_name: Optional[str]) -> bool:
+    g = _simplify_prefix(general)[:400]
+    fn = _simplify_prefix(full_name)
+    cn = _simplify_prefix(common_name) if common_name else ""
+
+    if fn and g.startswith(fn):
+        return True
+    if cn and g.startswith(cn):
+        return True
+    if fn and cn and g.startswith((fn + " " + cn).strip()):
+        return True
+    return False
+
+
+def _looks_truncated(text: str) -> bool:
+    """Detect likely truncation: long content ending in a stopword without terminal punctuation."""
+    t = (text or "").strip()
+    if len(t) < 140:
+        return False
+    if re.search(r"[\.\!\?\;\:\)\]\"']\s*$", t):
+        return False
+    m = re.search(r"([A-Za-z]+)\s*$", t)
+    if not m:
+        return False
+    return m.group(1).lower() in TRUNCATION_TAIL_WORDS
 
 
 def _is_valid_url(url: str) -> bool:
@@ -112,6 +247,9 @@ def validate_remedy(remedy: Dict[str, Any], seen_urls: Set[str]) -> List[str]:
         # Check for metadata pollution
         if _contains_site_metadata(full_name_clean):
             errors.append(f"{identifier} full_name contains metadata/footer pollution")
+        # Title normalization edge cases (e.g. chemical explanations)
+        if re.search(r":\s*[^:]*=", full_name_clean):
+            errors.append(f"{identifier} full_name contains formula/explanatory suffix (expected canonical title only)")
         if _contains_html(full_name_clean):
             errors.append(f"{identifier} full_name contains HTML tags")
         if _contains_control_chars(full_name_clean):
@@ -157,6 +295,10 @@ def validate_remedy(remedy: Dict[str, Any], seen_urls: Set[str]) -> List[str]:
         else:
             general_clean = _normalize_text(general)
             if general_clean:
+                if isinstance(full_name, str) and full_name.strip():
+                    cn_val = common_name if isinstance(common_name, str) else None
+                    if _general_starts_with_title(general_clean, full_name, cn_val):
+                        errors.append(f"{identifier} general starts with title/common-name bleed")
                 if _contains_site_metadata(general_clean[-200:]):  # Check end for footer leakage
                     errors.append(f"{identifier} general contains metadata/footer at end")
                 if _contains_html(general_clean):
@@ -179,8 +321,16 @@ def validate_remedy(remedy: Dict[str, Any], seen_urls: Set[str]) -> List[str]:
                 # Validate section name
                 if not isinstance(section_name, str) or not section_name.strip():
                     errors.append(f"{identifier} section name is empty or invalid")
-                elif len(section_name) > 100:
-                    errors.append(f"{identifier} section name too long")
+                else:
+                    normalized_section = _normalize_heading_key(section_name)
+                    if len(normalized_section) > 40:
+                        errors.append(f"{identifier} section name too long (likely malformed heading bleed)")
+                    if any(ch in normalized_section for ch in ("=", ":", "(", ")", "[" , "]")):
+                        errors.append(f"{identifier} section name contains metadata/prefix fragments")
+                    if normalized_section in RELATIONSHIP_HEADINGS:
+                        errors.append(f"{identifier} relationships-like heading '{normalized_section}' must not appear in sections")
+                    elif normalized_section not in ALLOWED_SECTION_HEADINGS:
+                        errors.append(f"{identifier} section name '{normalized_section}' is not a canonical heading")
 
                 # Validate section content
                 if not isinstance(section_content, str):
@@ -194,6 +344,8 @@ def validate_remedy(remedy: Dict[str, Any], seen_urls: Set[str]) -> List[str]:
                         errors.append(f"{identifier} section '{section_name}' has malformed unicode")
                     if _contains_malformed_unicode(section_content):
                         errors.append(f"{identifier} section '{section_name}' has replacement chars")
+                    if _looks_truncated(section_content):
+                        errors.append(f"{identifier} section '{section_name}' appears truncated (ends mid-sentence)")
 
     # Relationships (optional string or null)
     relationships = remedy.get("relationships")
@@ -217,6 +369,16 @@ def validate_remedy(remedy: Dict[str, Any], seen_urls: Set[str]) -> List[str]:
                         if section_content and relationships_clean == section_content:
                             errors.append(f"{identifier} relationships duplicates a section")
                             break
+    else:
+        # If relationships is null but relationship markers exist in general or any section, extraction likely failed.
+        relationship_markers = r"(Relationship\\s*\\.|\\bCompare\\s*:|\\bComplementary\\s*:|\\bAntidotes?\\s*:|\\bInimical\\s*:|\\bIncompatible\\s*:|\\bFollows\\s*:|\\bFollowed\\s*:)"
+        if isinstance(general, str) and re.search(relationship_markers, general, re.IGNORECASE):
+            errors.append(f"{identifier} relationships is null but relationship markers exist in general")
+        if isinstance(sections, dict):
+            for section_content in sections.values():
+                if isinstance(section_content, str) and re.search(relationship_markers, section_content, re.IGNORECASE):
+                    errors.append(f"{identifier} relationships is null but relationship markers exist in section content")
+                    break
 
     return errors
 
